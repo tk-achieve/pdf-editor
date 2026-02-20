@@ -1,0 +1,21 @@
+# Local environment overrides – never commit secrets
+.env
+*.env.local
+
+# Terraform state (if ever used alongside Bicep)
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# Bicep-generated ARM templates (re-generated on deploy)
+infra/*.json
+
+# OS artefacts
+.DS_Store
+Thumbs.db
+
+# Editor directories
+.vscode/
+.idea/
+*.swp

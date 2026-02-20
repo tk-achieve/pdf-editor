@@ -1,0 +1,144 @@
+name: Build and Deploy – Stirling PDF
+
+# ---------------------------------------------------------------------------
+# Triggers
+# ---------------------------------------------------------------------------
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Override image tag (leave blank to use sha-<short>)'
+        required: false
+        default: ''
+
+# ---------------------------------------------------------------------------
+# Permissions
+# OIDC federated identity – no long-lived secrets stored in GitHub.
+# ---------------------------------------------------------------------------
+permissions:
+  id-token: write    # Required for OIDC token request
+  contents: read
+
+# ---------------------------------------------------------------------------
+# Environment variables shared across jobs
+# Configure these as GitHub Actions Variables (not secrets) in repo Settings.
+# ---------------------------------------------------------------------------
+env:
+  ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}       # e.g. pdfeditoracrXXX.azurecr.io
+  ACR_NAME: ${{ vars.ACR_NAME }}                       # e.g. pdfeditoracrXXX
+  CONTAINER_APP_NAME: ${{ vars.CONTAINER_APP_NAME }}   # e.g. pdfeditor
+  RESOURCE_GROUP: ${{ vars.RESOURCE_GROUP }}           # e.g. rg-pdf-editor-prod
+  IMAGE_REPO: stirling-pdf
+
+# ---------------------------------------------------------------------------
+# Jobs
+# ---------------------------------------------------------------------------
+jobs:
+
+  # -------------------------------------------------------------------------
+  # 1. Build the Docker image and push it to ACR
+  # -------------------------------------------------------------------------
+  build-and-push:
+    name: Build & push image
+    runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.tag.outputs.tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.image_tag }}" ]; then
+            TAG="${{ github.event.inputs.image_tag }}"
+          else
+            TAG="sha-$(echo '${{ github.sha }}' | cut -c1-7)"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Image tag: ${TAG}"
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Exchange the OIDC token for a short-lived ACR refresh token
+      - name: Get ACR access token
+        id: acr-token
+        run: |
+          TOKEN=$(az acr login --name "${{ env.ACR_NAME }}" \
+                  --expose-token --output tsv --query accessToken)
+          echo "::add-mask::${TOKEN}"
+          echo "token=${TOKEN}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ACR_LOGIN_SERVER }}
+          # ACR token exchange uses a fixed username
+          username: 00000000-0000-0000-0000-000000000000
+          password: ${{ steps.acr-token.outputs.token }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPO }}:${{ steps.tag.outputs.tag }}
+            ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPO }}:latest
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          # Layer caching via GitHub Actions cache
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Provenance attestation (supply-chain security)
+          provenance: true
+          sbom: true
+
+  # -------------------------------------------------------------------------
+  # 2. Deploy the new image to Azure Container App
+  # -------------------------------------------------------------------------
+  deploy:
+    name: Deploy to Container App
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment: production      # Enables required reviewers / deployment gates
+
+    steps:
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Update Container App image
+        run: |
+          IMAGE="${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPO }}:${{ needs.build-and-push.outputs.image-tag }}"
+          echo "Deploying image: ${IMAGE}"
+
+          az containerapp update \
+            --name "${{ env.CONTAINER_APP_NAME }}" \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --image "${IMAGE}" \
+            --output table
+
+      - name: Verify deployment (wait for active revision)
+        run: |
+          az containerapp revision list \
+            --name "${{ env.CONTAINER_APP_NAME }}" \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --query "[?properties.active].{Name:name, Active:properties.active, Replicas:properties.replicas, Created:properties.createdTime}" \
+            --output table

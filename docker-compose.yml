@@ -1,0 +1,59 @@
+version: "3.8"
+
+# ---------------------------------------------------------------------------
+# Stirling PDF – local development / smoke-test stack
+# Copy .env.example → .env and adjust values before running.
+# ---------------------------------------------------------------------------
+services:
+  stirling-pdf:
+    image: stirlingtools/stirling-pdf:latest
+    # When doing local dev you can build from the repo Dockerfile instead:
+    # build: .
+    container_name: stirling-pdf
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-8080}:8080"
+    volumes:
+      # Tessdata (OCR language packs) – survives container replacement
+      - stirling-tessdata:/usr/share/tessdata
+      # Application config (settings.yml, etc.)
+      - stirling-configs:/configs
+      # Application logs
+      - stirling-logs:/logs
+      # Custom static files / branding overrides
+      - stirling-custom:/customFiles
+    environment:
+      # ---------- Security ----------
+      # Set false here because Azure Entra ID Easy Auth handles authn in prod.
+      # For local dev you can set to true and configure SECURITY_ENABLE_LOGIN.
+      DOCKER_ENABLE_SECURITY: "${DOCKER_ENABLE_SECURITY:-false}"
+
+      # ---------- Localisation ----------
+      APP_LOCALE: "${APP_LOCALE:-en_GB}"
+      LANGS: "${LANGS:-en_GB}"
+
+      # ---------- Branding ----------
+      APP_HOME_NAME: "${APP_HOME_NAME:-PDF Editor}"
+      APP_HOME_DESCRIPTION: "${APP_HOME_DESCRIPTION:-Internal PDF editing tool}"
+      APP_NAVBAR_NAME: "${APP_NAVBAR_NAME:-PDF Editor}"
+
+      # ---------- Features ----------
+      # Disable features that aren't needed and reduce attack surface
+      INSTALL_BOOK_AND_ADVANCED_HTML_OPS: "${INSTALL_BOOK_AND_ADVANCED_HTML_OPS:-false}"
+
+      # ---------- Telemetry ----------
+      # Opt out of upstream telemetry
+      DISABLE_ADDITIONAL_FEATURES: "${DISABLE_ADDITIONAL_FEATURES:-true}"
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  stirling-tessdata:
+  stirling-configs:
+  stirling-logs:
+  stirling-custom:
