@@ -364,3 +364,4 @@ Ensure you have an active **BAA with Microsoft** (available via the Microsoft Tr
 **Custom domain shows certificate error**
 - TLS provisioning can take up to 10 minutes after domain binding
 - Confirm the CNAME is resolving correctly before adding the domain in Azure Portal
+# credential test
